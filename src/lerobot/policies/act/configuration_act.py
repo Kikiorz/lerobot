@@ -53,9 +53,13 @@ class ACTConfig(PreTrainedConfig):
             the output data name, and the value is PolicyFeature, which consists of FeatureType and shape attributes.
         normalization_mapping: A dictionary that maps from a str value of FeatureType (e.g., "STATE", "VISUAL") to
             a corresponding NormalizationMode (e.g., NormalizationMode.MIN_MAX)
-        vision_backbone: Name of the torchvision resnet backbone to use for encoding images.
+        vision_backbone: Name of the visual backbone to use for encoding images.
+            ResNet backbones are loaded from torchvision. Use "dinov2" for a timm DINOv2 ViT.
         pretrained_backbone_weights: Pretrained weights from torchvision to initialize the backbone.
-            `None` means no pretrained weights.
+            `None` means no pretrained weights. Ignored when `vision_backbone="dinov2"`.
+        dinov2_model: timm model name used when `vision_backbone="dinov2"`.
+        dinov2_pretrained: Whether to load pretrained DINOv2 weights.
+        dinov2_train_backbone: Whether to train the DINOv2 backbone. Defaults to frozen.
         replace_final_stride_with_dilation: Whether to replace the ResNet's final 2x2 stride with a dilated
             convolution.
         pre_norm: Whether to use "pre-norm" in the transformer blocks.
@@ -97,6 +101,9 @@ class ACTConfig(PreTrainedConfig):
     # Vision backbone.
     vision_backbone: str = "resnet18"
     pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1"
+    dinov2_model: str = "vit_small_patch14_dinov2.lvd142m"
+    dinov2_pretrained: bool = True
+    dinov2_train_backbone: bool = False
     replace_final_stride_with_dilation: int = False
     # Transformer layers.
     pre_norm: bool = False
@@ -131,10 +138,13 @@ class ACTConfig(PreTrainedConfig):
         super().__post_init__()
 
         """Input validation (not exhaustive)."""
-        if not self.vision_backbone.startswith("resnet"):
+        if not (self.vision_backbone.startswith("resnet") or self.vision_backbone == "dinov2"):
             raise ValueError(
-                f"`vision_backbone` must be one of the ResNet variants. Got {self.vision_backbone}."
+                "`vision_backbone` must be one of the ResNet variants or 'dinov2'. "
+                f"Got {self.vision_backbone}."
             )
+        if self.vision_backbone == "dinov2":
+            self.pretrained_backbone_weights = None
         if self.temporal_ensemble_coeff is not None and self.n_action_steps > 1:
             raise NotImplementedError(
                 "`n_action_steps` must be 1 when using temporal ensembling. This is "

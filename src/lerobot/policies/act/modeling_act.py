@@ -28,15 +28,13 @@ import einops
 import numpy as np
 import torch
 import torch.nn.functional as F  # noqa: N812
-import torchvision
 from torch import Tensor, nn
-from torchvision.models._utils import IntermediateLayerGetter
-from torchvision.ops.misc import FrozenBatchNorm2d
 
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 
 from ..pretrained import PreTrainedPolicy
 from .configuration_act import ACTConfig
+from .vision_backbone import make_act_vision_backbone
 
 
 class ACTPolicy(PreTrainedPolicy):
@@ -323,15 +321,8 @@ class ACT(nn.Module):
 
         # Backbone for image feature extraction.
         if self.config.image_features:
-            backbone_model = getattr(torchvision.models, config.vision_backbone)(
-                replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
-                weights=config.pretrained_backbone_weights,
-                norm_layer=FrozenBatchNorm2d,
-            )
-            # Note: The assumption here is that we are using a ResNet model (and hence layer4 is the final
-            # feature map).
-            # Note: The forward method of this returns a dict: {"feature_map": output}.
-            self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
+            # The forward method of this returns a dict: {"feature_map": output}.
+            self.backbone, backbone_out_channels = make_act_vision_backbone(config)
 
         # Transformer (acts as VAE decoder when training with the variational objective).
         self.encoder = ACTEncoder(config)
@@ -350,7 +341,7 @@ class ACT(nn.Module):
         self.encoder_latent_input_proj = nn.Linear(config.latent_dim, config.dim_model)
         if self.config.image_features:
             self.encoder_img_feat_input_proj = nn.Conv2d(
-                backbone_model.fc.in_features, config.dim_model, kernel_size=1
+                backbone_out_channels, config.dim_model, kernel_size=1
             )
         # Transformer encoder positional embeddings.
         n_1d_tokens = 1  # for the latent
