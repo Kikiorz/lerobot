@@ -15,7 +15,9 @@
 # limitations under the License.
 
 import math
+from pathlib import Path
 
+import torch
 import torchvision
 from torch import Tensor, nn
 from torchvision.models._utils import IntermediateLayerGetter
@@ -32,6 +34,7 @@ class TimmDinoV2FeatureMap(nn.Module):
         model_name: str,
         *,
         pretrained: bool,
+        pretrained_weights: str | None,
         train_backbone: bool,
         image_size: tuple[int, int] | None,
     ) -> None:
@@ -45,7 +48,7 @@ class TimmDinoV2FeatureMap(nn.Module):
             ) from exc
 
         create_kwargs = {
-            "pretrained": pretrained,
+            "pretrained": pretrained and pretrained_weights is None,
             "num_classes": 0,
             "global_pool": "",
         }
@@ -57,6 +60,9 @@ class TimmDinoV2FeatureMap(nn.Module):
         except TypeError:
             create_kwargs.pop("img_size", None)
             self.model = timm.create_model(model_name, **create_kwargs)
+
+        if pretrained_weights is not None:
+            self._load_local_pretrained_weights(pretrained_weights)
 
         self.out_channels = int(getattr(self.model, "num_features"))
         self.patch_size = self._resolve_patch_size()
@@ -72,6 +78,34 @@ class TimmDinoV2FeatureMap(nn.Module):
         if not self.train_backbone:
             self.model.eval()
         return self
+
+    def _load_local_pretrained_weights(self, pretrained_weights: str) -> None:
+        weights_path = Path(pretrained_weights)
+        if not weights_path.exists():
+            raise FileNotFoundError(f"DINOv2/DINOv3 pretrained weights not found: {weights_path}")
+
+        if weights_path.suffix == ".safetensors":
+            from safetensors.torch import load_file
+
+            state_dict = load_file(weights_path)
+        else:
+            state_dict = torch.load(weights_path, map_location="cpu")
+
+        if isinstance(state_dict, dict) and "state_dict" in state_dict:
+            state_dict = state_dict["state_dict"]
+        if isinstance(state_dict, dict) and "model" in state_dict:
+            state_dict = state_dict["model"]
+
+        state_dict = {
+            key.removeprefix("module.").removeprefix("model."): value
+            for key, value in state_dict.items()
+        }
+        missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            print(
+                "Loaded local DINOv2/DINOv3 weights with "
+                f"{len(missing)} missing and {len(unexpected)} unexpected keys."
+            )
 
     def _resolve_patch_size(self) -> tuple[int, int]:
         patch_embed = getattr(self.model, "patch_embed", None)
@@ -126,6 +160,7 @@ def make_act_vision_backbone(config: ACTConfig) -> tuple[nn.Module, int]:
         backbone = TimmDinoV2FeatureMap(
             config.dinov2_model,
             pretrained=config.dinov2_pretrained,
+            pretrained_weights=config.dinov2_pretrained_weights,
             train_backbone=config.dinov2_train_backbone,
             image_size=_image_size_from_config(config),
         )

@@ -59,6 +59,7 @@ class ACTConfig(PreTrainedConfig):
             `None` means no pretrained weights. Ignored when `vision_backbone="dinov2"`.
         dinov2_model: timm model name used when `vision_backbone="dinov2"`.
         dinov2_pretrained: Whether to load pretrained DINOv2 weights.
+        dinov2_pretrained_weights: Optional local DINOv2/DINOv3 checkpoint path used instead of downloading from timm/HF.
         dinov2_train_backbone: Whether to train the DINOv2 backbone. Defaults to frozen.
         replace_final_stride_with_dilation: Whether to replace the ResNet's final 2x2 stride with a dilated
             convolution.
@@ -103,6 +104,7 @@ class ACTConfig(PreTrainedConfig):
     pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1"
     dinov2_model: str = "vit_small_patch14_dinov2.lvd142m"
     dinov2_pretrained: bool = True
+    dinov2_pretrained_weights: str | None = None
     dinov2_train_backbone: bool = False
     replace_final_stride_with_dilation: int = False
     # Transformer layers.
