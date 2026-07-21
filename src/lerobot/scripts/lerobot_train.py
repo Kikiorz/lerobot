@@ -196,10 +196,15 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         # Accelerate auto-detects the device based on the available hardware and ignores the policy.device setting.
         # Force the device to be CPU when the active config's device is set to CPU (works for both policy and reward model training).
         force_cpu = cfg.trainable_config.device == "cpu"
+        # `policy.use_amp` is the public training/evaluation switch.  Respect
+        # it here so `accelerator.autocast()` and gradient scaling are actually
+        # enabled during training rather than silently running in fp32.
+        mixed_precision = "fp16" if cfg.trainable_config.use_amp and not force_cpu else "no"
         accelerator = Accelerator(
             step_scheduler_with_optimizer=False,
             kwargs_handlers=[ddp_kwargs],
             cpu=force_cpu,
+            mixed_precision=mixed_precision,
         )
 
     init_logging(accelerator=accelerator)

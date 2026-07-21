@@ -61,6 +61,26 @@ class ACTPolicy(PreTrainedPolicy):
         self.config = config
 
         self.model = ACT(config)
+        action_dim = int(config.action_feature.shape[0])
+        if config.action_loss_weights is None:
+            action_loss_weights = torch.ones(action_dim, dtype=torch.float32)
+        else:
+            action_loss_weights = torch.as_tensor(config.action_loss_weights, dtype=torch.float32)
+            if action_loss_weights.shape != (action_dim,):
+                raise ValueError(
+                    "action_loss_weights must contain one value per action dimension: "
+                    f"expected {(action_dim,)}, got {tuple(action_loss_weights.shape)}"
+                )
+            if not torch.isfinite(action_loss_weights).all():
+                raise ValueError("action_loss_weights must be finite")
+            if (action_loss_weights < 0).any():
+                raise ValueError("action_loss_weights must be non-negative")
+            if action_loss_weights.sum() <= 0:
+                raise ValueError("action_loss_weights must contain at least one positive value")
+        # This is derived from config rather than checkpoint parameters, so old
+        # checkpoints remain loadable while every new checkpoint records the
+        # precise weighting vector in config.json.
+        self.register_buffer("_action_loss_weights", action_loss_weights, persistent=False)
 
         if config.temporal_ensemble_coeff is not None:
             self.temporal_ensembler = ACTTemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
@@ -141,9 +161,13 @@ class ACTPolicy(PreTrainedPolicy):
         actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
 
         abs_err = F.l1_loss(batch[ACTION], actions_hat, reduction="none")
-        valid_mask = ~batch["action_is_pad"].unsqueeze(-1)
-        num_valid = valid_mask.sum() * abs_err.shape[-1]
-        l1_loss = (abs_err * valid_mask).sum() / num_valid.clamp_min(1)
+        valid_mask = (~batch["action_is_pad"].unsqueeze(-1)).to(dtype=abs_err.dtype)
+        action_weights = self._action_loss_weights.to(dtype=abs_err.dtype)
+        weighted_mask = valid_mask * action_weights
+        # Normalizing by the weighted denominator preserves the reconstruction
+        # loss scale relative to KL while changing only the desired per-action
+        # gradient ratios.  It also cleanly supports zero-weight frozen dims.
+        l1_loss = (abs_err * weighted_mask).sum() / weighted_mask.sum().clamp_min(1)
 
         loss_dict = {"l1_loss": l1_loss.item()}
         if self.config.use_vae:

@@ -130,6 +130,7 @@ class ACTConfig(PreTrainedConfig):
     # Training and loss computation.
     dropout: float = 0.1
     kl_weight: float = 10.0
+    action_loss_weights: list[float] | None = None
 
     # Training preset
     optimizer_lr: float = 1e-5
