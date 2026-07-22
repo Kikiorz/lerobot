@@ -569,7 +569,16 @@ class ACTEncoderLayer(nn.Module):
         if self.pre_norm:
             x = self.norm1(x)
         q = k = x if pos_embed is None else x + pos_embed
-        x = self.self_attn(q, k, value=x, key_padding_mask=key_padding_mask)
+        # Attention weights are never consumed by ACT. Avoid materializing the
+        # full (heads, sequence, sequence) matrix, which is especially large
+        # for multi-camera ViT feature maps.
+        x = self.self_attn(
+            q,
+            k,
+            value=x,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )
         x = x[0]  # note: [0] to select just the output, not the attention weights
         x = skip + self.dropout1(x)
         if self.pre_norm:
@@ -653,7 +662,12 @@ class ACTDecoderLayer(nn.Module):
         if self.pre_norm:
             x = self.norm1(x)
         q = k = self.maybe_add_pos_embed(x, decoder_pos_embed)
-        x = self.self_attn(q, k, value=x)[0]  # select just the output, not the attention weights
+        x = self.self_attn(
+            q,
+            k,
+            value=x,
+            need_weights=False,
+        )[0]
         x = skip + self.dropout1(x)
         if self.pre_norm:
             skip = x
@@ -665,7 +679,8 @@ class ACTDecoderLayer(nn.Module):
             query=self.maybe_add_pos_embed(x, decoder_pos_embed),
             key=self.maybe_add_pos_embed(encoder_out, encoder_pos_embed),
             value=encoder_out,
-        )[0]  # select just the output, not the attention weights
+            need_weights=False,
+        )[0]
         x = skip + self.dropout2(x)
         if self.pre_norm:
             skip = x

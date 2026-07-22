@@ -188,11 +188,17 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     # Create Accelerator if not provided
     # It will automatically detect if running in distributed mode or single-process mode
     # We set step_scheduler_with_optimizer=False to prevent accelerate from adjusting the lr_scheduler steps based on the num_processes
-    # We set find_unused_parameters=True to handle models with conditional computation
+    # ACT's fixed training path uses every trainable parameter. Avoid the extra
+    # autograd-graph traversal that DDP performs when searching for unused ones,
+    # while preserving the conservative default for other policies that may use
+    # conditional computation.
     if accelerator is None:
         from accelerate.utils import DistributedDataParallelKwargs
 
-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        is_act_policy = (
+            not cfg.is_reward_model_training and getattr(cfg.policy, "type", None) == "act"
+        )
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=not is_act_policy)
         # Accelerate auto-detects the device based on the available hardware and ignores the policy.device setting.
         # Force the device to be CPU when the active config's device is set to CPU (works for both policy and reward model training).
         force_cpu = cfg.trainable_config.device == "cpu"
