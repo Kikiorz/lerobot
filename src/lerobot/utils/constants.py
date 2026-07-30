@@ -23,6 +23,10 @@ OBS_ENV_STATE = OBS_STR + ".environment_state"
 OBS_STATE = OBS_STR + ".state"
 OBS_IMAGE = OBS_STR + ".image"
 OBS_IMAGES = OBS_IMAGE + "s"
+# Training-only, precomputed frozen-DINO feature maps. This deliberately does
+# not live below ``observation.images`` so visual ImageNet normalization does
+# not run over already-normalized backbone outputs.
+OBS_DINO_FEATURES = OBS_STR + ".dino_features"
 OBS_LANGUAGE = OBS_STR + ".language"
 OBS_LANGUAGE_TOKENS = OBS_LANGUAGE + ".tokens"
 OBS_LANGUAGE_ATTENTION_MASK = OBS_LANGUAGE + ".attention_mask"

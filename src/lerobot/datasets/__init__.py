@@ -22,6 +22,7 @@ require_package("av", extra="dataset")
 
 from .aggregate import aggregate_datasets
 from .compute_stats import DEFAULT_QUANTILES, aggregate_stats, get_feature_stats
+from .cached_dino_feature_dataset import CachedDinoFeatureDataset
 from .dataset_metadata import CODEBASE_VERSION, LeRobotDatasetMetadata
 from .dataset_tools import (
     add_features,
@@ -61,6 +62,7 @@ from .video_utils import VideoEncodingManager
 
 __all__ = [
     "CODEBASE_VERSION",
+    "CachedDinoFeatureDataset",
     "DEFAULT_EPISODES_PATH",
     "DEFAULT_QUANTILES",
     "EVENT_ONLY_STYLES",

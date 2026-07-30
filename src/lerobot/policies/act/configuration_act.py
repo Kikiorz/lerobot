@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 from dataclasses import dataclass, field
 
 from lerobot.configs import NormalizationMode, PreTrainedConfig
@@ -131,6 +132,12 @@ class ACTConfig(PreTrainedConfig):
     dropout: float = 0.1
     kl_weight: float = 10.0
     action_loss_weights: list[float] | None = None
+    # Optional piecewise loss-weight curriculum. Each ``values`` row has one
+    # coefficient per action dimension and is paired with the matching global
+    # optimizer step in ``steps``. ACT interpolates linearly between knots.
+    action_loss_weight_schedule_steps: list[int] | None = None
+    action_loss_weight_schedule_values: list[list[float]] | None = None
+    action_loss_weight_schedule_interpolation: str = "linear"
 
     # Training preset
     optimizer_lr: float = 1e-5
@@ -162,6 +169,36 @@ class ACTConfig(PreTrainedConfig):
             raise ValueError(
                 f"Multiple observation steps not handled yet. Got `nobs_steps={self.n_obs_steps}`"
             )
+        has_schedule_steps = self.action_loss_weight_schedule_steps is not None
+        has_schedule_values = self.action_loss_weight_schedule_values is not None
+        if has_schedule_steps != has_schedule_values:
+            raise ValueError(
+                "action_loss_weight_schedule_steps and action_loss_weight_schedule_values must be supplied together"
+            )
+        if has_schedule_steps:
+            assert self.action_loss_weight_schedule_steps is not None
+            assert self.action_loss_weight_schedule_values is not None
+            steps = self.action_loss_weight_schedule_steps
+            values = self.action_loss_weight_schedule_values
+            if self.action_loss_weights is not None:
+                raise ValueError("Use either action_loss_weights or the action loss schedule, not both")
+            if not steps or len(steps) != len(values):
+                raise ValueError("action loss schedule needs one non-empty value row for every schedule step")
+            if steps[0] != 0:
+                raise ValueError("action_loss_weight_schedule_steps must begin at global step 0")
+            if any(not isinstance(step, int) or isinstance(step, bool) or step < 0 for step in steps):
+                raise ValueError("action_loss_weight_schedule_steps must contain non-negative integers")
+            if any(right <= left for left, right in zip(steps, steps[1:])):
+                raise ValueError("action_loss_weight_schedule_steps must be strictly increasing")
+            if self.action_loss_weight_schedule_interpolation != "linear":
+                raise ValueError("action_loss_weight_schedule_interpolation currently supports only 'linear'")
+            for row in values:
+                if not row:
+                    raise ValueError("each action loss schedule row must contain at least one weight")
+                if any(not math.isfinite(float(weight)) or float(weight) < 0.0 for weight in row):
+                    raise ValueError("action loss schedule weights must be finite and non-negative")
+                if sum(float(weight) for weight in row) <= 0.0:
+                    raise ValueError("each action loss schedule row must contain at least one positive weight")
 
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(

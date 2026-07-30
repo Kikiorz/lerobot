@@ -24,6 +24,7 @@ from lerobot.configs.train import TrainPipelineConfig
 from lerobot.transforms import ImageTransforms
 from lerobot.utils.constants import ACTION, IMAGENET_STATS, OBS_PREFIX, REWARD
 
+from .cached_dino_feature_dataset import CachedDinoFeatureDataset
 from .dataset_metadata import LeRobotDatasetMetadata
 from .lerobot_dataset import LeRobotDataset
 from .multi_dataset import MultiLeRobotDataset
@@ -65,7 +66,7 @@ def resolve_delta_timestamps(
     return delta_timestamps
 
 
-def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDataset:
+def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDataset | CachedDinoFeatureDataset:
     """Handles the logic of setting up delta timestamps and image transforms before creating a dataset.
 
     Args:
@@ -110,6 +111,11 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
                 tolerance_s=cfg.tolerance_s,
                 return_uint8=True,
             )
+
+        if cfg.dataset.dino_feature_cache_manifest is not None:
+            if cfg.dataset.streaming:
+                raise ValueError("DINO feature caches are only supported with non-streaming LeRobotDataset")
+            dataset = CachedDinoFeatureDataset(dataset, cfg.dataset.dino_feature_cache_manifest)
     else:
         raise NotImplementedError("The MultiLeRobotDataset isn't supported for now.")
         dataset = MultiLeRobotDataset(

@@ -38,6 +38,11 @@ class DatasetConfig:
     # When True, video frames are returned as uint8 tensors (0-255) instead of float32 (0.0-1.0).
     # This reduces memory and speeds up DataLoader IPC. The training pipeline handles the conversion.
     return_uint8: bool = False
+    # Optional JSON manifest for a precomputed frozen-DINO feature cache. When set, the
+    # dataset returns ``observation.dino_features`` instead of decoding camera videos.
+    # The cache is intentionally external to the LeRobot dataset so training artifacts
+    # and source videos remain unchanged.
+    dino_feature_cache_manifest: str | None = None
     streaming: bool = False
 
     def __post_init__(self) -> None:

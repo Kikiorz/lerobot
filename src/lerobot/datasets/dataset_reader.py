@@ -261,12 +261,15 @@ class DatasetReader:
             futures = [pool.submit(_decode_single, k, ts) for k, ts in items]
             return dict(f.result() for f in futures)
 
-    def get_item(self, idx) -> dict:
+    def get_item(self, idx, decode_videos: bool = True) -> dict:
         """Core __getitem__ logic. Assumes hf_dataset is loaded.
 
         ``idx`` is a *relative* index into the (possibly episode-filtered)
         HF dataset, **not** the absolute frame index stored in the ``index``
-        column.  The absolute index is retrieved from the row itself.
+        column.  The absolute index is retrieved from the row itself. Set
+        ``decode_videos=False`` for callers that provide a replacement visual
+        representation (for example a precomputed feature cache); non-video
+        data and delta-timestamp queries are still returned unchanged.
         """
         item = self.hf_dataset[idx]
         ep_idx = item["episode_index"].item()
@@ -280,7 +283,7 @@ class DatasetReader:
             for key, val in query_result.items():
                 item[key] = val
 
-        if len(self._meta.video_keys) > 0:
+        if decode_videos and len(self._meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
             query_timestamps = self._get_query_timestamps(current_ts, query_indices)
             video_frames = self._query_videos(query_timestamps, ep_idx)
@@ -289,7 +292,11 @@ class DatasetReader:
         if self._image_transforms is not None:
             image_keys = self._meta.camera_keys
             for cam in image_keys:
-                item[cam] = self._image_transforms(item[cam])
+                # ``decode_videos=False`` deliberately omits video-backed
+                # camera tensors. Image-backed cameras, when present, retain
+                # their existing transform behavior.
+                if cam in item:
+                    item[cam] = self._image_transforms(item[cam])
 
         # Add task as a string
         task_idx = item["task_index"].item()

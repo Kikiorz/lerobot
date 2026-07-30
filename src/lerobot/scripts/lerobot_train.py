@@ -475,6 +475,14 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
+        # The loss curriculum is keyed to the trainer's absolute global step,
+        # rather than to whichever checkpoint buffer happened to be loaded.
+        # This makes both fresh fine-tuning and checkpoint resume deterministic
+        # on every DDP rank.
+        unwrapped_policy = accelerator.unwrap_model(policy, keep_fp32_wrapper=True)
+        if has_method(unwrapped_policy, "set_action_loss_schedule_step"):
+            unwrapped_policy.set_action_loss_schedule_step(step)
+
         train_tracker, output_dict = update_policy(
             train_tracker,
             policy,

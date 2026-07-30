@@ -19,6 +19,7 @@ As per Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware (https
 The majority of changes here involve removing unused code, unifying naming, and adding helpful comments.
 """
 
+import bisect
 import math
 from collections import deque
 from collections.abc import Callable
@@ -30,7 +31,7 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_DINO_FEATURES, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 
 from ..pretrained import PreTrainedPolicy
 from .configuration_act import ACTConfig
@@ -62,21 +63,52 @@ class ACTPolicy(PreTrainedPolicy):
 
         self.model = ACT(config)
         action_dim = int(config.action_feature.shape[0])
-        if config.action_loss_weights is None:
-            action_loss_weights = torch.ones(action_dim, dtype=torch.float32)
-        else:
-            action_loss_weights = torch.as_tensor(config.action_loss_weights, dtype=torch.float32)
-            if action_loss_weights.shape != (action_dim,):
+        schedule_steps = config.action_loss_weight_schedule_steps
+        schedule_values = config.action_loss_weight_schedule_values
+        if schedule_steps is not None:
+            assert schedule_values is not None
+            action_loss_schedule_values = torch.as_tensor(schedule_values, dtype=torch.float32)
+            if action_loss_schedule_values.ndim != 2 or action_loss_schedule_values.shape[1] != action_dim:
                 raise ValueError(
-                    "action_loss_weights must contain one value per action dimension: "
-                    f"expected {(action_dim,)}, got {tuple(action_loss_weights.shape)}"
+                    "Each action loss schedule row must contain one value per action dimension: "
+                    f"expected (*, {action_dim}), got {tuple(action_loss_schedule_values.shape)}"
                 )
-            if not torch.isfinite(action_loss_weights).all():
-                raise ValueError("action_loss_weights must be finite")
-            if (action_loss_weights < 0).any():
-                raise ValueError("action_loss_weights must be non-negative")
-            if action_loss_weights.sum() <= 0:
-                raise ValueError("action_loss_weights must contain at least one positive value")
+            if not torch.isfinite(action_loss_schedule_values).all():
+                raise ValueError("action loss schedule weights must be finite")
+            if (action_loss_schedule_values < 0).any() or (action_loss_schedule_values.sum(dim=1) <= 0).any():
+                raise ValueError("each action loss schedule row must contain at least one positive weight")
+            action_loss_weights = action_loss_schedule_values[0].clone()
+            self._action_loss_schedule_steps: tuple[int, ...] | None = tuple(int(step) for step in schedule_steps)
+            # Knot values are stored in config.json. Only the current global
+            # step has to survive resume; keeping the value matrix derived
+            # preserves compatibility with older checkpoints.
+            self.register_buffer(
+                "_action_loss_schedule_values", action_loss_schedule_values, persistent=False
+            )
+            self.register_buffer("_action_loss_schedule_step", torch.zeros((), dtype=torch.long))
+        else:
+            self._action_loss_schedule_steps = None
+            self.register_buffer(
+                "_action_loss_schedule_values", torch.empty((0, action_dim), dtype=torch.float32), persistent=False
+            )
+            self.register_buffer(
+                "_action_loss_schedule_step", torch.zeros((), dtype=torch.long), persistent=False
+            )
+            if config.action_loss_weights is None:
+                action_loss_weights = torch.ones(action_dim, dtype=torch.float32)
+            else:
+                action_loss_weights = torch.as_tensor(config.action_loss_weights, dtype=torch.float32)
+                if action_loss_weights.shape != (action_dim,):
+                    raise ValueError(
+                        "action_loss_weights must contain one value per action dimension: "
+                        f"expected {(action_dim,)}, got {tuple(action_loss_weights.shape)}"
+                    )
+                if not torch.isfinite(action_loss_weights).all():
+                    raise ValueError("action_loss_weights must be finite")
+                if (action_loss_weights < 0).any():
+                    raise ValueError("action_loss_weights must be non-negative")
+                if action_loss_weights.sum() <= 0:
+                    raise ValueError("action_loss_weights must contain at least one positive value")
         # This is derived from config rather than checkpoint parameters, so old
         # checkpoints remain loadable while every new checkpoint records the
         # precise weighting vector in config.json.
@@ -115,6 +147,41 @@ class ACTPolicy(PreTrainedPolicy):
         else:
             self._action_queue = deque([], maxlen=self.config.n_action_steps)
 
+    def _set_action_loss_weights_for_step(self, step: int) -> None:
+        """Materialize the configured action-loss schedule at ``step``."""
+        if self._action_loss_schedule_steps is None:
+            return
+        steps = self._action_loss_schedule_steps
+        values = self._action_loss_schedule_values
+        if step <= steps[0]:
+            selected = values[0]
+        elif step >= steps[-1]:
+            selected = values[-1]
+        else:
+            right = bisect.bisect_right(steps, step)
+            left = right - 1
+            fraction = float(step - steps[left]) / float(steps[right] - steps[left])
+            selected = values[left].lerp(values[right], fraction)
+        self._action_loss_weights.copy_(selected)
+
+    def set_action_loss_schedule_step(self, step: int) -> None:
+        """Set the absolute global step for a fresh start or a resumed run."""
+        if step < 0:
+            raise ValueError(f"action-loss schedule step must be non-negative, got {step}")
+        if self._action_loss_schedule_steps is not None:
+            self._action_loss_schedule_step.fill_(step)
+            self._set_action_loss_weights_for_step(step)
+
+    def update(self) -> None:
+        """Advance the action-loss curriculum after a successful optimizer step.
+
+        The generic training loop invokes this on every DDP rank only after
+        ``optimizer.step()``. The persistent counter therefore resumes at the
+        same global update on every rank after a checkpoint restore.
+        """
+        if self._action_loss_schedule_steps is not None:
+            self._action_loss_schedule_step.add_(1)
+
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         """Select a single action given environment observations.
@@ -145,7 +212,10 @@ class ACTPolicy(PreTrainedPolicy):
         """Predict a chunk of actions given environment observations."""
         self.eval()
 
-        if self.config.image_features:
+        # Offline cache training injects projection-input DINO maps under
+        # ``observation.dino_features``. Deployment never supplies that key,
+        # so it continues to assemble raw camera images and execute DINO.
+        if self.config.image_features and OBS_DINO_FEATURES not in batch:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
 
@@ -154,7 +224,8 @@ class ACTPolicy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training or validation."""
-        if self.config.image_features:
+        self._set_action_loss_weights_for_step(int(self._action_loss_schedule_step.item()))
+        if self.config.image_features and OBS_DINO_FEATURES not in batch:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
 
@@ -400,6 +471,10 @@ class ACT(nn.Module):
             [robot_state_feature] (optional): (B, state_dim) batch of robot states.
 
             [image_features]: (B, n_cameras, C, H, W) batch of images.
+            [observation.dino_features]: (B, n_cameras, C, H, W) frozen-DINO
+                feature maps for offline cache training. When supplied, these
+                are used before the trainable 1x1 visual projection and the
+                raw-image backbone is skipped.
                 AND/OR
             [env_state_feature]: (B, env_dim) batch of environment states.
 
@@ -416,7 +491,12 @@ class ACT(nn.Module):
                 "actions must be provided when using the variational objective in training mode."
             )
 
-        batch_size = batch[OBS_IMAGES][0].shape[0] if OBS_IMAGES in batch else batch[OBS_ENV_STATE].shape[0]
+        if OBS_IMAGES in batch:
+            batch_size = batch[OBS_IMAGES][0].shape[0]
+        elif OBS_DINO_FEATURES in batch:
+            batch_size = batch[OBS_DINO_FEATURES].shape[0]
+        else:
+            batch_size = batch[OBS_ENV_STATE].shape[0]
 
         # Prepare the latent for input to the transformer encoder.
         if self.config.use_vae and ACTION in batch and self.training:
@@ -486,8 +566,31 @@ class ACT(nn.Module):
             # For a list of images, the H and W may vary but H*W is constant.
             # NOTE: If modifying this section, verify on MPS devices that
             # gradients remain stable (no explosions or NaNs).
-            for img in batch[OBS_IMAGES]:
-                cam_features = self.backbone(img)["feature_map"]
+            if OBS_DINO_FEATURES in batch:
+                cached_features = batch[OBS_DINO_FEATURES]
+                expected_cameras = len(self.config.image_features)
+                expected_channels = self.encoder_img_feat_input_proj.in_channels
+                if cached_features.ndim != 5:
+                    raise ValueError(
+                        "Cached DINO features must have shape "
+                        "(batch, cameras, channels, height, width), got "
+                        f"{tuple(cached_features.shape)}."
+                    )
+                if cached_features.shape[1] != expected_cameras:
+                    raise ValueError(
+                        "Cached DINO feature camera count does not match ACT config: "
+                        f"got {cached_features.shape[1]}, expected {expected_cameras}."
+                    )
+                if cached_features.shape[2] != expected_channels:
+                    raise ValueError(
+                        "Cached DINO feature channels do not match ACT's visual projection: "
+                        f"got {cached_features.shape[2]}, expected {expected_channels}."
+                    )
+                camera_feature_maps = cached_features.unbind(dim=1)
+            else:
+                camera_feature_maps = (self.backbone(img)["feature_map"] for img in batch[OBS_IMAGES])
+
+            for cam_features in camera_feature_maps:
                 cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
                 cam_features = self.encoder_img_feat_input_proj(cam_features)
 
