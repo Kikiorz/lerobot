@@ -43,7 +43,12 @@ from lerobot.common.train_utils import (
 from lerobot.common.wandb_utils import WandBLogger
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.datasets import EpisodeAwareSampler, make_dataset
+from lerobot.datasets import (
+    CacheLocalityPairedBatchSampler,
+    CachedDinoFeatureDataset,
+    EpisodeAwareSampler,
+    make_dataset,
+)
 from lerobot.envs import close_envs, make_env, make_env_pre_post_processors
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies import PreTrainedPolicy, make_policy, make_pre_post_processors
@@ -408,22 +413,78 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         shuffle = True
         sampler = None
 
+    cache_locality_batch_size = cfg.dataset.dino_cache_locality_batch_size
+    cache_locality_batch_sampler = None
+    if cache_locality_batch_size is not None:
+        if not isinstance(dataset, CachedDinoFeatureDataset):
+            raise ValueError(
+                "dataset.dino_cache_locality_batch_size requires "
+                "dataset.dino_feature_cache_manifest so training uses CachedDinoFeatureDataset."
+            )
+        if sampler is not None:
+            raise ValueError(
+                "dataset.dino_cache_locality_batch_size cannot be combined with a policy that requests "
+                "EpisodeAwareSampler (drop_n_last_frames)."
+            )
+        if accelerator.split_batches:
+            raise ValueError(
+                "dataset.dino_cache_locality_batch_size requires Accelerate split_batches=False. "
+                "It relies on BatchSamplerShard assigning complete adjacent batches to each rank."
+            )
+        if cache_locality_batch_size % cfg.batch_size != 0:
+            raise ValueError(
+                "dataset.dino_cache_locality_batch_size must be a multiple of the per-process batch size, "
+                f"got {cache_locality_batch_size} and batch_size={cfg.batch_size}."
+            )
+
+        global_batch_size = cfg.batch_size * accelerator.num_processes
+        if cache_locality_batch_size % global_batch_size != 0:
+            raise ValueError(
+                "dataset.dino_cache_locality_batch_size must be a multiple of the global batch size so "
+                "Accelerate BatchSamplerShard keeps each rank pair inside a locality block, got "
+                f"{cache_locality_batch_size} and global_batch_size={global_batch_size}."
+            )
+
+        cache_locality_batch_sampler = CacheLocalityPairedBatchSampler(
+            dataset,
+            batch_size=cfg.batch_size,
+            locality_batch_size=cache_locality_batch_size,
+            drop_last=False,
+        )
+        shuffle = False
+        if is_main_process:
+            logging.info(
+                "Using sequential DINO cache-locality sampling: %d contiguous rows per block; "
+                "random cache access is disabled.",
+                cache_locality_batch_size,
+            )
+
     # Only swap in the language-aware collate when the dataset actually
     # declares language columns; otherwise stay on PyTorch's default
     # collate so non-language training runs are unaffected.
     collate_fn = lerobot_collate_fn if dataset.meta.has_language_columns else None
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        num_workers=cfg.num_workers,
-        batch_size=cfg.batch_size,
-        shuffle=shuffle and not cfg.dataset.streaming,
-        sampler=sampler,
-        pin_memory=device.type == "cuda",
-        drop_last=False,
-        collate_fn=collate_fn,
-        prefetch_factor=cfg.prefetch_factor if cfg.num_workers > 0 else None,
-        persistent_workers=cfg.persistent_workers and cfg.num_workers > 0,
-    )
+    dataloader_kwargs = {
+        "num_workers": cfg.num_workers,
+        "pin_memory": device.type == "cuda",
+        "collate_fn": collate_fn,
+        "prefetch_factor": cfg.prefetch_factor if cfg.num_workers > 0 else None,
+        "persistent_workers": cfg.persistent_workers and cfg.num_workers > 0,
+    }
+    if cache_locality_batch_sampler is not None:
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_sampler=cache_locality_batch_sampler,
+            **dataloader_kwargs,
+        )
+    else:
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=cfg.batch_size,
+            shuffle=shuffle and not cfg.dataset.streaming,
+            sampler=sampler,
+            drop_last=False,
+            **dataloader_kwargs,
+        )
 
     # Prepare everything with accelerator
     accelerator.wait_for_everyone()

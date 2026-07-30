@@ -51,7 +51,7 @@ from .lerobot_dataset import LeRobotDataset
 from .multi_dataset import MultiLeRobotDataset
 from .pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
 from .pyav_utils import check_video_encoder_parameters_pyav, detect_available_encoders_pyav
-from .sampler import EpisodeAwareSampler
+from .sampler import CacheLocalityPairedBatchSampler, EpisodeAwareSampler
 from .streaming_dataset import StreamingLeRobotDataset
 from .utils import DEFAULT_EPISODES_PATH, create_lerobot_dataset_card
 from .video_utils import VideoEncodingManager
@@ -63,6 +63,7 @@ from .video_utils import VideoEncodingManager
 __all__ = [
     "CODEBASE_VERSION",
     "CachedDinoFeatureDataset",
+    "CacheLocalityPairedBatchSampler",
     "DEFAULT_EPISODES_PATH",
     "DEFAULT_QUANTILES",
     "EVENT_ONLY_STYLES",

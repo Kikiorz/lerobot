@@ -25,7 +25,7 @@ from datasets import Dataset  # noqa: E402
 from lerobot.datasets.io_utils import (
     hf_transform_to_torch,
 )
-from lerobot.datasets.sampler import EpisodeAwareSampler
+from lerobot.datasets.sampler import CacheLocalityPairedBatchSampler, EpisodeAwareSampler
 
 
 def calculate_episode_data_index(hf_dataset: Dataset) -> dict[str, torch.Tensor]:
@@ -137,3 +137,38 @@ def test_partial_episode_drop_warns(caplog):
     # Episode 0 is skipped (1 frame, drop 1), Episode 1 keeps frames 2-5
     assert sampler.indices == [2, 3, 4, 5]
     assert "Episode 0" in caplog.text
+
+
+def test_cache_locality_sampler_streams_ascending_batches():
+    sampler = CacheLocalityPairedBatchSampler(range(19), batch_size=4, locality_batch_size=8)
+
+    assert list(sampler) == [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15], [16, 17, 18]]
+    assert len(sampler) == 5
+
+
+def test_cache_locality_sampler_pairs_batches_for_accelerate_shards():
+    from accelerate.data_loader import BatchSamplerShard
+
+    sampler = CacheLocalityPairedBatchSampler(range(16), batch_size=4, locality_batch_size=8)
+    rank0 = BatchSamplerShard(sampler, num_processes=2, process_index=0, split_batches=False)
+    rank1 = BatchSamplerShard(sampler, num_processes=2, process_index=1, split_batches=False)
+
+    assert list(rank0) == [[0, 1, 2, 3], [8, 9, 10, 11]]
+    assert list(rank1) == [[4, 5, 6, 7], [12, 13, 14, 15]]
+
+
+@pytest.mark.parametrize(
+    ("batch_size", "locality_batch_size", "match"),
+    [
+        (0, 8, "batch_size must be a positive integer"),
+        (4, 0, "locality_batch_size must be a positive integer"),
+        (4, 10, "locality_batch_size must be a multiple of batch_size"),
+    ],
+)
+def test_cache_locality_sampler_validates_sizes(batch_size, locality_batch_size, match):
+    with pytest.raises(ValueError, match=match):
+        CacheLocalityPairedBatchSampler(
+            range(16),
+            batch_size=batch_size,
+            locality_batch_size=locality_batch_size,
+        )

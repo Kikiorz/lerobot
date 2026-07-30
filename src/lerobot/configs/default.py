@@ -43,9 +43,22 @@ class DatasetConfig:
     # The cache is intentionally external to the LeRobot dataset so training artifacts
     # and source videos remain unchanged.
     dino_feature_cache_manifest: str | None = None
+    # Optional contiguous-cache window for frozen-DINO training. When set, training
+    # replaces the usual random sampler with ascending cache-index batches so a
+    # cache larger than RAM is read sequentially. ``None`` preserves the ordinary
+    # shuffled DataLoader exactly. The value must be a positive multiple of the
+    # per-process batch size (and, for DDP, of the global batch size).
+    dino_cache_locality_batch_size: int | None = None
     streaming: bool = False
 
     def __post_init__(self) -> None:
+        if self.dino_cache_locality_batch_size is not None:
+            value = self.dino_cache_locality_batch_size
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(
+                    "dino_cache_locality_batch_size must be a positive integer or None, "
+                    f"got {value!r}"
+                )
         if self.episodes is not None:
             if any(ep < 0 for ep in self.episodes):
                 raise ValueError(
